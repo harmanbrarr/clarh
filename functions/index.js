@@ -7,6 +7,7 @@ const OPENAI_API_KEY = defineSecret("OPENAI_API_KEY");
 exports.generateClarh = onRequest(
   { secrets: [OPENAI_API_KEY] },
   async (req, res) => {
+    // CORS
     res.set("Access-Control-Allow-Origin", "*");
     res.set("Access-Control-Allow-Headers", "Content-Type");
     res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -24,6 +25,7 @@ exports.generateClarh = onRequest(
         return res.status(400).json({ error: "Missing text" });
       }
 
+      // ✅ Eastern reference time (America/Toronto)
       const easternNow = new Date().toLocaleString("sv-SE", {
         timeZone: "America/Toronto",
       });
@@ -31,53 +33,60 @@ exports.generateClarh = onRequest(
       const systemPrompt = `
 You are a strict classifier and date parser for a productivity app.
 
-Your job is to analyze the user's input and return EXACTLY ONE JSON object
-representing either a Task, Event, or Note.
+Your job is to analyze the user’s input and return EXACTLY ONE JSON object
+representing a Task, Event, or Note.
 
 You MUST follow all rules below.
 
-────────────────────────
-REFERENCE TIME
-────────────────────────
-Current reference datetime (Eastern Time, America/Toronto):
+────────────────────────────────
+REFERENCE TIME (EASTERN)
+────────────────────────────────
+Current reference datetime (America/Toronto):
 "${easternNow}"
 
-Use this reference to interpret:
+Use this to interpret:
 - today
 - tomorrow
+- later today
 - next week
 - this Friday
+- in 2 hours
 
-All dates MUST be calculated in America/Toronto time.
+ALL dates and times MUST be calculated in America/Toronto time.
 
-────────────────────────
+────────────────────────────────
 TYPE DEFINITIONS
-────────────────────────
+────────────────────────────────
 
 TASK:
-Something the user must DO.
+An action the user must do.
+
 Examples:
 - "buy groceries tomorrow"
 - "clean room"
 - "submit assignment Friday"
 
 Rules:
-- Use ONLY due_date
-- due_date = ISO date (YYYY-MM-DD)
-- datetime MUST be null
-- If no date mentioned → due_date = null
+- due_date = ISO DATE (YYYY-MM-DD)
+- datetime = ISO DATETIME at START OF DAY (00:00 Eastern) for that date
+- readable_datetime = friendly date (e.g. "Sun, Dec 14")
+- If NO date mentioned:
+  - due_date = null
+  - datetime = null
+  - readable_datetime = "unscheduled"
 
 EVENT:
-Something that happens at a specific time or place.
+Something that happens at a specific time OR location.
+
 Examples:
 - "dentist appointment tomorrow at 3pm"
 - "dinner with John at 7pm"
+- "meeting at Starbucks"
 
 Rules:
-- Use ONLY datetime
-- datetime = full ISO datetime (Eastern)
+- datetime REQUIRED (ISO, Eastern)
+- readable_datetime REQUIRED
 - due_date MUST be null
-- readable_datetime SHOULD be provided if datetime exists
 
 NOTE:
 Informational only.
@@ -88,11 +97,65 @@ Rules:
 - readable_datetime = null
 - location = null
 
-────────────────────────
-OUTPUT JSON (STRICT)
-────────────────────────
+────────────────────────────────
+LOCATION EXTRACTION RULES
+────────────────────────────────
+You MUST extract a location if ANY place is mentioned.
 
-Return ONLY valid JSON with EXACTLY these keys:
+Valid locations include:
+- Businesses: "Walmart", "Starbucks", "Costco"
+- Landmarks: "City Hall", "the mall", "the airport"
+- Home references: "mom's house", "my place", "home"
+- Proper nouns used as places: "Yorkdale", "Eaton Centre"
+- Full addresses: "123 Main St"
+- Anything following:
+  "at", "in", "to", "from", "near", "by", "around", "inside", "outside"
+
+Examples:
+"drop off mom at Walmart tomorrow" → location = "Walmart"
+"dentist appointment at 3pm" → location = "dentist"
+"go to mom's house" → location = "mom's house"
+
+If NO location exists → location = null  
+Never guess.
+
+────────────────────────────────
+DATETIME PARSING RULES
+────────────────────────────────
+You MUST parse natural language dates such as:
+- "tomorrow"
+- "next week"
+- "in two hours"
+- "friday at 3pm"
+- "april 6"
+- "later today"
+
+Output formats:
+- datetime → ISO string (Eastern)
+- readable_datetime → human friendly:
+  - "Tomorrow"
+  - "Tomorrow at 3 PM"
+  - "Fri, Apr 6"
+  - "Today at 5 PM"
+
+────────────────────────────────
+NAMING RULES
+────────────────────────────────
+- task_name → 2–4 word action
+- event_name → short title
+- note_title → 1–3 word topic
+
+────────────────────────────────
+FINAL ENFORCEMENT
+────────────────────────────────
+- Task → datetime is start-of-day only (no time)
+- Event → due_date MUST be null
+- Note → ALL date fields MUST be null
+- Return ONLY valid JSON
+
+────────────────────────────────
+OUTPUT JSON (STRICT)
+────────────────────────────────
 
 {
   "type": "Task" | "Event" | "Note",
@@ -108,28 +171,6 @@ Return ONLY valid JSON with EXACTLY these keys:
   "location": string | null,
   "original_text": string
 }
-
-────────────────────────
-NAMING RULES
-────────────────────────
-- task_name: 2–4 word action
-- event_name: short title
-- note_title: 1–3 word topic
-
-────────────────────────
-LOCATION RULES
-────────────────────────
-Only extract location if explicitly stated.
-Otherwise set location = null.
-Never guess.
-
-────────────────────────
-FINAL ENFORCEMENT
-────────────────────────
-- Task → datetime MUST be null
-- Event → due_date MUST be null
-- Note → ALL date fields MUST be null
-- Return ONLY JSON
 
 User text:
 "${inputText}"
@@ -149,7 +190,7 @@ User text:
       });
 
       const raw = completion.output_text;
-      console.log("RAW:", raw);
+      console.log("OPENAI RAW:", raw);
 
       let data;
       try {
@@ -159,14 +200,12 @@ User text:
         data = match ? JSON.parse(match[0]) : {};
       }
 
+      // Safety fallbacks
       data.original_text = inputText;
-
       if (!data.type) data.type = "Note";
       if (!("location" in data)) data.location = null;
 
       if (data.type === "Task") {
-        data.datetime = null;
-        data.readable_datetime = null;
         if (!data.task_name) data.task_name = inputText.slice(0, 30);
       }
 
