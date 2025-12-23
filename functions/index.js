@@ -25,71 +25,94 @@ exports.generateClarh = onRequest(
         return res.status(400).json({ error: "Missing text" });
       }
 
-      // ✅ Eastern reference time (America/Toronto)
+      // Eastern reference time (America/Toronto)
       const easternNow = new Date().toLocaleString("sv-SE", {
         timeZone: "America/Toronto",
       });
 
+      /* ---------------- SYSTEM PROMPT ---------------- */
+
       const systemPrompt = `
-You are a strict classifier and date parser for a productivity app.
+You are a STRICT classifier and parser for a productivity app.
 
-Your job is to analyze the user’s input and return EXACTLY ONE JSON object
-representing a Task, Event, or Note.
+Your job:
+- Classify input as Task, Event, or Note
+- Extract dates, times, and locations
+- Follow ALL rules exactly
 
-You MUST follow all rules below.
-
-────────────────────────────────
-REFERENCE TIME (EASTERN)
-────────────────────────────────
-Current reference datetime (America/Toronto):
+────────────────────────
+REFERENCE TIME
+────────────────────────
+Current datetime (America/Toronto):
 "${easternNow}"
 
 Use this to interpret:
 - today
 - tomorrow
+- tonight
 - later today
-- next week
-- this Friday
+- next Friday
 - in 2 hours
 
-ALL dates and times MUST be calculated in America/Toronto time.
+ALL dates MUST be Eastern Time.
 
-────────────────────────────────
-TYPE DEFINITIONS
-────────────────────────────────
+────────────────────────
+CORE DEFINITIONS
+────────────────────────
 
-TASK:
-An action the user must do.
+1) TASK → user must TAKE ACTION
 
-Examples:
-- "buy groceries tomorrow"
-- "clean room"
-- "submit assignment Friday"
+A Task is ANY text where the user is the implied actor of an action.
+This includes casual, descriptive, or continuous phrasing.
+
+Examples (ALL are Tasks):
+- "wash dishes"
+- "washing dishes today"
+- "going grocery shopping tonight"
+- "do laundry"
+- "need to buy milk"
+- "clean room tomorrow"
+
+IMPORTANT:
+- Imperative verbs are NOT required
+- Continuous tense ("washing", "going", "doing") is STILL a Task
+- Date words like "today" or "tonight" DO NOT make it an Event
 
 Rules:
-- due_date = ISO DATE (YYYY-MM-DD)
-- datetime = ISO DATETIME at START OF DAY (00:00 Eastern) for that date
-- readable_datetime = friendly date (e.g. "Sun, Dec 14")
-- If NO date mentioned:
-  - due_date = null
-  - datetime = null
-  - readable_datetime = "unscheduled"
+- May include date and/or location
+- If date exists:
+  - due_date = ISO start-of-day (00:00 Eastern)
+  - datetime = ISO start-of-day (00:00 Eastern)
+  - readable_datetime = friendly date (e.g. "Sun, 12/14")
+- If NO date:
+  - due_date = Inbox
+  - datetime = Inbox
+  - readable_datetime = Inbox
 
-EVENT:
-Something that happens at a specific time OR location.
+────────────────────────
+
+2) EVENT → something that HAPPENS
 
 Examples:
-- "dentist appointment tomorrow at 3pm"
-- "dinner with John at 7pm"
+- "dentist appointment at 3pm"
+- "birthday party Friday"
 - "meeting at Starbucks"
 
 Rules:
-- datetime REQUIRED (ISO, Eastern)
+- Appointment / gathering nouns
+- OR explicit time (3pm, 14:00, etc.)
+- datetime REQUIRED (full ISO, Eastern)
 - readable_datetime REQUIRED
 - due_date MUST be null
 
-NOTE:
-Informational only.
+────────────────────────
+
+3) NOTE → informational only
+
+Examples:
+- "laptop charger broke"
+- "idea for startup"
+- "reading books is good"
 
 Rules:
 - due_date = null
@@ -97,65 +120,33 @@ Rules:
 - readable_datetime = null
 - location = null
 
-────────────────────────────────
+────────────────────────
 LOCATION EXTRACTION RULES
-────────────────────────────────
-You MUST extract a location if ANY place is mentioned.
+────────────────────────
+Extract location if ANY place is mentioned.
 
 Valid locations include:
-- Businesses: "Walmart", "Starbucks", "Costco"
-- Landmarks: "City Hall", "the mall", "the airport"
-- Home references: "mom's house", "my place", "home"
-- Proper nouns used as places: "Yorkdale", "Eaton Centre"
-- Full addresses: "123 Main St"
+- Businesses: Walmart, Starbucks, Costco
+- Landmarks: mall, airport, City Hall
+- Homes: mom's house, my place, home
+- Proper nouns: Yorkdale, Eaton Centre
+- Addresses: 123 Main St
 - Anything following:
-  "at", "in", "to", "from", "near", "by", "around", "inside", "outside"
+  at, in, to, from, near, by, around
 
-Examples:
-"drop off mom at Walmart tomorrow" → location = "Walmart"
-"dentist appointment at 3pm" → location = "dentist"
-"go to mom's house" → location = "mom's house"
-
-If NO location exists → location = null  
+If none → location = null  
 Never guess.
 
-────────────────────────────────
-DATETIME PARSING RULES
-────────────────────────────────
-You MUST parse natural language dates such as:
-- "tomorrow"
-- "next week"
-- "in two hours"
-- "friday at 3pm"
-- "april 6"
-- "later today"
-
-Output formats:
-- datetime → ISO string (Eastern)
-- readable_datetime → human friendly:
-  - "Tomorrow"
-  - "Tomorrow at 3 PM"
-  - "Fri, Apr 6"
-  - "Today at 5 PM"
-
-────────────────────────────────
+────────────────────────
 NAMING RULES
-────────────────────────────────
+────────────────────────
 - task_name → 2–4 word action
 - event_name → short title
 - note_title → 1–3 word topic
 
-────────────────────────────────
-FINAL ENFORCEMENT
-────────────────────────────────
-- Task → datetime is start-of-day only (no time)
-- Event → due_date MUST be null
-- Note → ALL date fields MUST be null
-- Return ONLY valid JSON
-
-────────────────────────────────
-OUTPUT JSON (STRICT)
-────────────────────────────────
+────────────────────────
+OUTPUT JSON (ONLY THIS)
+────────────────────────
 
 {
   "type": "Task" | "Event" | "Note",
@@ -171,6 +162,8 @@ OUTPUT JSON (STRICT)
   "location": string | null,
   "original_text": string
 }
+
+Return ONLY valid JSON.
 
 User text:
 "${inputText}"
@@ -200,26 +193,58 @@ User text:
         data = match ? JSON.parse(match[0]) : {};
       }
 
-      // Safety fallbacks
-      data.original_text = inputText;
+      /* ---------------- SERVER GUARDRAILS (OPTION A) ---------------- */
+
+      // Always preserve model's Task decision
+      // Only force Event if explicit time or appointment noun exists
+      const lower = inputText.toLowerCase();
+      const hasExplicitTime =
+        /\b\d{1,2}(:\d{2})?\s?(am|pm)\b/.test(lower) ||
+        /\b([01]?\d|2[0-3]):[0-5]\d\b/.test(lower);
+
+      const hasEventNoun =
+        /\b(appointment|meeting|party|event|session|conference|wedding|dinner|lunch)\b/.test(
+          lower
+        );
+
+      if (hasExplicitTime || hasEventNoun) {
+        data.type = "Event";
+      }
+
+      // Final safety defaults
       if (!data.type) data.type = "Note";
+      data.original_text = inputText;
       if (!("location" in data)) data.location = null;
 
+      /* ---------------- NORMALIZATION ---------------- */
+
       if (data.type === "Task") {
-        if (!data.task_name) data.task_name = inputText.slice(0, 30);
+        data.event_name = null;
+        data.note_title = null;
+        if (!data.task_name) {
+          data.task_name = inputText.split(" ").slice(0, 4).join(" ");
+        }
       }
 
       if (data.type === "Event") {
+        data.task_name = null;
+        data.note_title = null;
         data.due_date = null;
-        if (!data.event_name) data.event_name = inputText.slice(0, 30);
+        if (!data.event_name) {
+          data.event_name = inputText.split(" ").slice(0, 4).join(" ");
+        }
       }
 
       if (data.type === "Note") {
+        data.task_name = null;
+        data.event_name = null;
         data.due_date = null;
         data.datetime = null;
         data.readable_datetime = null;
         data.location = null;
-        if (!data.note_title) data.note_title = inputText.slice(0, 20);
+        if (!data.note_title) {
+          data.note_title = inputText.split(" ").slice(0, 3).join(" ");
+        }
       }
 
       return res.json(data);
